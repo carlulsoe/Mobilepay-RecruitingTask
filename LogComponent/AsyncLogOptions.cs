@@ -4,7 +4,7 @@ namespace LogTest
     {
         public string LogDirectory { get; set; } = Path.Combine(".", "LogTest");
 
-        public ILogClock Clock { get; set; } = new SystemLogClock();
+        public TimeProvider TimeProvider { get; set; } = TimeProvider.System;
 
         public int QueueCapacity { get; set; } = 10_000;
     }

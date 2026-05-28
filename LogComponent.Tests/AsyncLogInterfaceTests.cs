@@ -8,8 +8,8 @@ public sealed class AsyncLogInterfaceTests
     public void WriteLog_WritesMessageToFile()
     {
         using TestLogDirectory directory = new();
-        FakeClock clock = new(new DateTime(2026, 5, 28, 10, 30, 0, 123));
-        using AsyncLogInterface logger = CreateLogger(directory.Path, clock);
+        FakeLogTimeProvider timeProvider = new(new DateTime(2026, 5, 28, 10, 30, 0, 123));
+        using AsyncLogInterface logger = CreateLogger(directory.Path, timeProvider);
 
         logger.WriteLog("hello world");
         logger.Stop_With_Flush();
@@ -23,28 +23,28 @@ public sealed class AsyncLogInterfaceTests
     public void WriteLog_CreatesNewFileWhenMidnightIsCrossed()
     {
         using TestLogDirectory directory = new();
-        FakeClock clock = new(new DateTime(2026, 5, 28, 23, 59, 59, 900));
-        using AsyncLogInterface logger = CreateLogger(directory.Path, clock);
+        FakeLogTimeProvider timeProvider = new(new DateTime(2026, 5, 28, 23, 59, 59, 900));
+        using AsyncLogInterface logger = CreateLogger(directory.Path, timeProvider);
 
         logger.WriteLog("before midnight");
-        clock.Now = new DateTime(2026, 5, 29, 0, 0, 0, 100);
+        timeProvider.Now = new DateTime(2026, 5, 29, 0, 0, 0, 100);
         logger.WriteLog("after midnight");
         logger.Stop_With_Flush();
 
         string[] files = Directory.GetFiles(directory.Path, "*.log");
         Assert.Equal(2, files.Length);
-        Assert.Contains(files, file => Path.GetFileName(file).StartsWith("Log20260528", StringComparison.Ordinal));
-        Assert.Contains(files, file => Path.GetFileName(file).StartsWith("Log20260529", StringComparison.Ordinal));
-        Assert.Contains("before midnight", File.ReadAllText(files.Single(file => Path.GetFileName(file).StartsWith("Log20260528", StringComparison.Ordinal))));
-        Assert.Contains("after midnight", File.ReadAllText(files.Single(file => Path.GetFileName(file).StartsWith("Log20260529", StringComparison.Ordinal))));
+        Assert.Contains(Path.Combine(directory.Path, "Log20260528.log"), files);
+        Assert.Contains(Path.Combine(directory.Path, "Log20260529.log"), files);
+        Assert.Contains("before midnight", File.ReadAllText(Path.Combine(directory.Path, "Log20260528.log")));
+        Assert.Contains("after midnight", File.ReadAllText(Path.Combine(directory.Path, "Log20260529.log")));
     }
 
     [Fact]
     public void StopWithFlush_WaitsUntilAcceptedMessagesAreWritten()
     {
         using TestLogDirectory directory = new();
-        FakeClock clock = new(new DateTime(2026, 5, 28, 12, 0, 0));
-        using AsyncLogInterface logger = CreateLogger(directory.Path, clock);
+        FakeLogTimeProvider timeProvider = new(new DateTime(2026, 5, 28, 12, 0, 0));
+        using AsyncLogInterface logger = CreateLogger(directory.Path, timeProvider);
 
         for (int i = 0; i < 250; i++)
         {
@@ -64,8 +64,8 @@ public sealed class AsyncLogInterfaceTests
     public void StopWithoutFlush_DiscardsOutstandingMessages()
     {
         using TestLogDirectory directory = new();
-        FakeClock clock = new(new DateTime(2026, 5, 28, 12, 0, 0));
-        using AsyncLogInterface logger = CreateLogger(directory.Path, clock);
+        FakeLogTimeProvider timeProvider = new(new DateTime(2026, 5, 28, 12, 0, 0));
+        using AsyncLogInterface logger = CreateLogger(directory.Path, timeProvider);
 
         const int messageCount = 25_000;
         for (int i = 0; i < messageCount; i++)
@@ -83,15 +83,15 @@ public sealed class AsyncLogInterfaceTests
     public void WriteLog_DropsMessagesWhenQueueIsFull()
     {
         using TestLogDirectory directory = new();
-        FakeClock clock = new(new DateTime(2026, 5, 28, 12, 0, 0));
+        FakeLogTimeProvider timeProvider = new(new DateTime(2026, 5, 28, 12, 0, 0));
         using AsyncLogInterface logger = new(new AsyncLogOptions
         {
             LogDirectory = directory.Path,
-            Clock = clock,
+            TimeProvider = timeProvider,
             QueueCapacity = 1
         });
 
-        for (int i = 0; i < 1_000; i++)
+        for (int i = 0; i < 100_000; i++)
         {
             logger.WriteLog("bounded-" + i);
         }
@@ -99,15 +99,16 @@ public sealed class AsyncLogInterfaceTests
         logger.Stop_With_Flush();
 
         int writtenMessages = CountMessages(directory.Path, "bounded-");
-        Assert.InRange(writtenMessages, 1, 999);
+        Assert.True(logger.DroppedMessages > 0);
+        Assert.InRange(writtenMessages, 1, 99_999);
     }
 
     [Fact]
     public void StopMethods_AreSafeWhenCalledConcurrently()
     {
         using TestLogDirectory directory = new();
-        FakeClock clock = new(new DateTime(2026, 5, 28, 12, 0, 0));
-        using AsyncLogInterface logger = CreateLogger(directory.Path, clock);
+        FakeLogTimeProvider timeProvider = new(new DateTime(2026, 5, 28, 12, 0, 0));
+        using AsyncLogInterface logger = CreateLogger(directory.Path, timeProvider);
 
         for (int i = 0; i < 1_000; i++)
         {
@@ -127,12 +128,12 @@ public sealed class AsyncLogInterfaceTests
         Assert.True(immediateStopped);
     }
 
-    private static AsyncLogInterface CreateLogger(string directory, ILogClock clock)
+    private static AsyncLogInterface CreateLogger(string directory, TimeProvider timeProvider)
     {
         return new AsyncLogInterface(new AsyncLogOptions
         {
             LogDirectory = directory,
-            Clock = clock,
+            TimeProvider = timeProvider,
             QueueCapacity = 10_000
         });
     }
@@ -149,14 +150,21 @@ public sealed class AsyncLogInterfaceTests
             .Count(line => line.Contains(prefix, StringComparison.Ordinal));
     }
 
-    private sealed class FakeClock : ILogClock
+    private sealed class FakeLogTimeProvider : TimeProvider
     {
-        public FakeClock(DateTime now)
+        public FakeLogTimeProvider(DateTime now)
         {
             Now = now;
         }
 
         public DateTime Now { get; set; }
+
+        public override TimeZoneInfo LocalTimeZone => TimeZoneInfo.Utc;
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            return new DateTimeOffset(DateTime.SpecifyKind(Now, DateTimeKind.Utc));
+        }
     }
 
     private sealed class TestLogDirectory : IDisposable

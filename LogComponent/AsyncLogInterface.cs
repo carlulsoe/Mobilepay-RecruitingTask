@@ -11,6 +11,7 @@ namespace LogTest
 
         private StreamWriter? _writer;
         private DateOnly? _currentFileDate;
+        private long _droppedMessages;
         private int _stopRequested;
         private int _immediateStopRequested;
         private bool _joined;
@@ -37,7 +38,7 @@ namespace LogTest
             {
                 SingleReader = true,
                 SingleWriter = false,
-                FullMode = BoundedChannelFullMode.DropWrite
+                FullMode = BoundedChannelFullMode.Wait
             });
 
             _workerThread = new Thread(MainLoop)
@@ -48,6 +49,8 @@ namespace LogTest
             _workerThread.Start();
         }
 
+        public long DroppedMessages => Interlocked.Read(ref _droppedMessages);
+
         public void WriteLog(string s)
         {
             if (Volatile.Read(ref _stopRequested) != 0)
@@ -55,7 +58,11 @@ namespace LogTest
                 return;
             }
 
-            _channel.Writer.TryWrite(new LogLine(s ?? string.Empty, _options.Clock.Now));
+            LogLine logLine = new(s ?? string.Empty, _options.TimeProvider.GetLocalNow().DateTime);
+            if (!_channel.Writer.TryWrite(logLine) && Volatile.Read(ref _stopRequested) == 0)
+            {
+                Interlocked.Increment(ref _droppedMessages);
+            }
         }
 
         public void Stop_Without_Flush()
@@ -162,16 +169,20 @@ namespace LogTest
             CloseWriter();
             Directory.CreateDirectory(_options.LogDirectory);
 
-            string fileName = "Log" + timestamp.ToString("yyyyMMdd HHmmss fff") + ".log";
+            string fileName = "Log" + timestamp.ToString("yyyyMMdd") + ".log";
             string filePath = Path.Combine(_options.LogDirectory, fileName);
+            bool shouldWriteHeader = !File.Exists(filePath) || new FileInfo(filePath).Length == 0;
 
             _writer = new StreamWriter(filePath, append: true);
             _currentFileDate = entryDate;
-            _writer.Write("Timestamp".PadRight(25, ' '));
-            _writer.Write('\t');
-            _writer.Write("Data".PadRight(15, ' '));
-            _writer.Write('\t');
-            _writer.WriteLine();
+            if (shouldWriteHeader)
+            {
+                _writer.Write("Timestamp".PadRight(25, ' '));
+                _writer.Write('\t');
+                _writer.Write("Data".PadRight(15, ' '));
+                _writer.Write('\t');
+                _writer.WriteLine();
+            }
         }
 
         private void CloseWriter()
