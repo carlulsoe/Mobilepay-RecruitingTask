@@ -77,7 +77,7 @@ the end
 
 ## Solution notes
 
-The log component has been refactored around a single background worker and a bounded channel. Calls to `WriteLog` only timestamp and enqueue a message, so the calling application is not blocked by file I/O. If the queue is full, `WriteLog` drops the new message instead of waiting, and the logger exposes `DroppedMessages` so this behavior is measurable. The worker owns the file writer, writes one deterministic file per date (`LogyyyyMMdd.log`), opens a new file when the log entry date changes, and disposes the previous writer during rollover and shutdown.
+The log component has been refactored around a single background worker and a bounded channel. Calls to `WriteLog` only timestamp and enqueue a message, so the calling application is not blocked by file I/O. If the queue is full, `WriteLog` drops the new message instead of waiting, and the logger exposes `DroppedMessagesDueToBackpressure` so this behavior is measurable. The worker owns the file writer, writes one file per logger instance and date (`LogyyyyMMdd-HHmmss-runid.log`), opens a new file when the log entry date changes, and disposes the previous writer during rollover and shutdown.
 
 `Stop_With_Flush` stops accepting new messages and blocks until all accepted messages are written. `Stop_Without_Flush` stops accepting new messages, discards anything still queued, and then shuts the worker down. File-system errors are contained inside the worker so the calling application can continue; failed writes may be lost, but the logger attempts to recover on later writes by reopening the writer.
 

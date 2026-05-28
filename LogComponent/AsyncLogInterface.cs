@@ -4,6 +4,7 @@ namespace LogTest
 {
     public sealed class AsyncLogInterface : LogInterface, IDisposable
     {
+        private readonly string _runId;
         private readonly AsyncLogOptions _options;
         private readonly Channel<LogLine> _channel;
         private readonly object _joinLock = new();
@@ -34,6 +35,8 @@ namespace LogTest
                 throw new ArgumentOutOfRangeException(nameof(options), "Queue capacity must be greater than zero.");
             }
 
+            _runId = _options.TimeProvider.GetLocalNow().DateTime.ToString("HHmmss") + "-" + Guid.NewGuid().ToString("N")[..8];
+
             _channel = Channel.CreateBounded<LogLine>(new BoundedChannelOptions(_options.QueueCapacity)
             {
                 SingleReader = true,
@@ -49,7 +52,9 @@ namespace LogTest
             _workerThread.Start();
         }
 
-        public long DroppedMessages => Interlocked.Read(ref _droppedMessages);
+        public long DroppedMessagesDueToBackpressure => Interlocked.Read(ref _droppedMessages);
+
+        public long DroppedMessages => DroppedMessagesDueToBackpressure;
 
         public void WriteLog(string s)
         {
@@ -169,7 +174,7 @@ namespace LogTest
             CloseWriter();
             Directory.CreateDirectory(_options.LogDirectory);
 
-            string fileName = "Log" + timestamp.ToString("yyyyMMdd") + ".log";
+            string fileName = "Log" + timestamp.ToString("yyyyMMdd") + "-" + _runId + ".log";
             string filePath = Path.Combine(_options.LogDirectory, fileName);
             bool shouldWriteHeader = !File.Exists(filePath) || new FileInfo(filePath).Length == 0;
 
@@ -187,9 +192,21 @@ namespace LogTest
 
         private void CloseWriter()
         {
-            _writer?.Dispose();
-            _writer = null;
-            _currentFileDate = null;
+            try
+            {
+                _writer?.Dispose();
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+            finally
+            {
+                _writer = null;
+                _currentFileDate = null;
+            }
         }
     }
 }

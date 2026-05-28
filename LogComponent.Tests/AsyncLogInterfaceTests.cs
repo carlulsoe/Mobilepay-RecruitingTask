@@ -33,10 +33,10 @@ public sealed class AsyncLogInterfaceTests
 
         string[] files = Directory.GetFiles(directory.Path, "*.log");
         Assert.Equal(2, files.Length);
-        Assert.Contains(Path.Combine(directory.Path, "Log20260528.log"), files);
-        Assert.Contains(Path.Combine(directory.Path, "Log20260529.log"), files);
-        Assert.Contains("before midnight", File.ReadAllText(Path.Combine(directory.Path, "Log20260528.log")));
-        Assert.Contains("after midnight", File.ReadAllText(Path.Combine(directory.Path, "Log20260529.log")));
+        string beforeMidnightFile = AssertSingleFileForDate(files, "Log20260528-");
+        string afterMidnightFile = AssertSingleFileForDate(files, "Log20260529-");
+        Assert.Contains("before midnight", File.ReadAllText(beforeMidnightFile));
+        Assert.Contains("after midnight", File.ReadAllText(afterMidnightFile));
     }
 
     [Fact]
@@ -58,6 +58,25 @@ public sealed class AsyncLogInterfaceTests
         {
             Assert.Contains("flush-" + i, content);
         }
+    }
+
+    [Fact]
+    public void SeparateLoggerInstances_WriteToSeparateFiles()
+    {
+        using TestLogDirectory directory = new();
+        FakeLogTimeProvider timeProvider = new(new DateTime(2026, 5, 28, 12, 0, 0));
+        using AsyncLogInterface firstLogger = CreateLogger(directory.Path, timeProvider);
+        using AsyncLogInterface secondLogger = CreateLogger(directory.Path, timeProvider);
+
+        firstLogger.WriteLog("first logger");
+        secondLogger.WriteLog("second logger");
+        firstLogger.Stop_With_Flush();
+        secondLogger.Stop_With_Flush();
+
+        string[] files = Directory.GetFiles(directory.Path, "*.log");
+        Assert.Equal(2, files.Length);
+        Assert.Single(files, file => File.ReadAllText(file).Contains("first logger", StringComparison.Ordinal));
+        Assert.Single(files, file => File.ReadAllText(file).Contains("second logger", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -99,8 +118,39 @@ public sealed class AsyncLogInterfaceTests
         logger.Stop_With_Flush();
 
         int writtenMessages = CountMessages(directory.Path, "bounded-");
+        Assert.Equal(logger.DroppedMessagesDueToBackpressure, logger.DroppedMessages);
         Assert.True(logger.DroppedMessages > 0);
         Assert.InRange(writtenMessages, 1, 99_999);
+    }
+
+    [Fact]
+    public void WriteLog_AfterStopIsIgnored()
+    {
+        using TestLogDirectory directory = new();
+        FakeLogTimeProvider timeProvider = new(new DateTime(2026, 5, 28, 12, 0, 0));
+        using AsyncLogInterface logger = CreateLogger(directory.Path, timeProvider);
+
+        logger.WriteLog("before stop");
+        logger.Stop_With_Flush();
+        logger.WriteLog("after stop");
+
+        string content = ReadAllLogs(directory.Path);
+        Assert.Contains("before stop", content);
+        Assert.DoesNotContain("after stop", content);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Constructor_RejectsInvalidQueueCapacity(int queueCapacity)
+    {
+        using TestLogDirectory directory = new();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new AsyncLogInterface(new AsyncLogOptions
+        {
+            LogDirectory = directory.Path,
+            QueueCapacity = queueCapacity
+        }));
     }
 
     [Fact]
@@ -148,6 +198,11 @@ public sealed class AsyncLogInterfaceTests
         return Directory.GetFiles(directory, "*.log")
             .SelectMany(File.ReadLines)
             .Count(line => line.Contains(prefix, StringComparison.Ordinal));
+    }
+
+    private static string AssertSingleFileForDate(string[] files, string datePrefix)
+    {
+        return Assert.Single(files, file => Path.GetFileName(file).StartsWith(datePrefix, StringComparison.Ordinal));
     }
 
     private sealed class FakeLogTimeProvider : TimeProvider
