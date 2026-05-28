@@ -74,3 +74,18 @@ numbers going from 0 to 14
 * A few words on what is fixed, refactored and why the code ended up looking as it does in
 the end
 * Finally we don't expect you to spend a whole or several days on this, but feel free to put in an effort and share something you feel proud of!
+
+## Solution notes
+
+The log component has been refactored around a single background worker and a thread-safe queue. Calls to `WriteLog` only timestamp and enqueue a message, so the calling application is not blocked by file I/O. The worker owns the file writer, opens a new file when the log entry date changes, and disposes the previous writer during rollover and shutdown.
+
+`Stop_With_Flush` stops accepting new messages and blocks until all accepted messages are written. `Stop_Without_Flush` stops accepting new messages, discards anything still queued, and then shuts the worker down. File-system errors are contained inside the worker so the calling application can continue; failed writes may be lost, but the logger attempts to recover on later writes by reopening the writer.
+
+The implementation also introduces injectable options and a clock so the component can be tested without relying on real midnight timing. Unit tests cover writing, midnight rollover, flush shutdown, and immediate shutdown.
+
+Run the verification with:
+
+```bash
+dotnet build CodeTest.sln
+dotnet run --project LogComponent.Tests/LogComponent.Tests.csproj
+```
