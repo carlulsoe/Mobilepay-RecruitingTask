@@ -6,6 +6,6 @@ namespace LogTest
 
         public ILogClock Clock { get; set; } = new SystemLogClock();
 
-        public TimeSpan IdleWaitTimeout { get; set; } = TimeSpan.FromMilliseconds(25);
+        public int QueueCapacity { get; set; } = 10_000;
     }
 }

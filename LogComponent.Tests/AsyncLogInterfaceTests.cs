@@ -2,38 +2,10 @@ using LogTest;
 
 namespace LogComponent.Tests;
 
-public static class AsyncLogInterfaceTests
+public sealed class AsyncLogInterfaceTests
 {
-    public static int Main()
-    {
-        TestCase[] tests =
-        [
-            new("WriteLog_WritesMessageToFile", WriteLog_WritesMessageToFile),
-            new("WriteLog_CreatesNewFileWhenMidnightIsCrossed", WriteLog_CreatesNewFileWhenMidnightIsCrossed),
-            new("StopWithFlush_WaitsUntilAcceptedMessagesAreWritten", StopWithFlush_WaitsUntilAcceptedMessagesAreWritten),
-            new("StopWithoutFlush_DiscardsOutstandingMessages", StopWithoutFlush_DiscardsOutstandingMessages)
-        ];
-
-        int failures = 0;
-        foreach (TestCase test in tests)
-        {
-            try
-            {
-                test.Run();
-                Console.WriteLine("PASS " + test.Name);
-            }
-            catch (Exception ex)
-            {
-                failures++;
-                Console.WriteLine("FAIL " + test.Name);
-                Console.WriteLine(ex);
-            }
-        }
-
-        return failures == 0 ? 0 : 1;
-    }
-
-    private static void WriteLog_WritesMessageToFile()
+    [Fact]
+    public void WriteLog_WritesMessageToFile()
     {
         using TestLogDirectory directory = new();
         FakeClock clock = new(new DateTime(2026, 5, 28, 10, 30, 0, 123));
@@ -43,11 +15,12 @@ public static class AsyncLogInterfaceTests
         logger.Stop_With_Flush();
 
         string content = ReadAllLogs(directory.Path);
-        AssertContains("hello world", content);
-        AssertContains("2026-05-28 10:30:00:123", content);
+        Assert.Contains("hello world", content);
+        Assert.Contains("2026-05-28 10:30:00:123", content);
     }
 
-    private static void WriteLog_CreatesNewFileWhenMidnightIsCrossed()
+    [Fact]
+    public void WriteLog_CreatesNewFileWhenMidnightIsCrossed()
     {
         using TestLogDirectory directory = new();
         FakeClock clock = new(new DateTime(2026, 5, 28, 23, 59, 59, 900));
@@ -59,14 +32,15 @@ public static class AsyncLogInterfaceTests
         logger.Stop_With_Flush();
 
         string[] files = Directory.GetFiles(directory.Path, "*.log");
-        AssertEqual(2, files.Length);
-        AssertAny(files, file => Path.GetFileName(file).StartsWith("Log20260528", StringComparison.Ordinal));
-        AssertAny(files, file => Path.GetFileName(file).StartsWith("Log20260529", StringComparison.Ordinal));
-        AssertContains("before midnight", File.ReadAllText(files.Single(file => Path.GetFileName(file).StartsWith("Log20260528", StringComparison.Ordinal))));
-        AssertContains("after midnight", File.ReadAllText(files.Single(file => Path.GetFileName(file).StartsWith("Log20260529", StringComparison.Ordinal))));
+        Assert.Equal(2, files.Length);
+        Assert.Contains(files, file => Path.GetFileName(file).StartsWith("Log20260528", StringComparison.Ordinal));
+        Assert.Contains(files, file => Path.GetFileName(file).StartsWith("Log20260529", StringComparison.Ordinal));
+        Assert.Contains("before midnight", File.ReadAllText(files.Single(file => Path.GetFileName(file).StartsWith("Log20260528", StringComparison.Ordinal))));
+        Assert.Contains("after midnight", File.ReadAllText(files.Single(file => Path.GetFileName(file).StartsWith("Log20260529", StringComparison.Ordinal))));
     }
 
-    private static void StopWithFlush_WaitsUntilAcceptedMessagesAreWritten()
+    [Fact]
+    public void StopWithFlush_WaitsUntilAcceptedMessagesAreWritten()
     {
         using TestLogDirectory directory = new();
         FakeClock clock = new(new DateTime(2026, 5, 28, 12, 0, 0));
@@ -82,11 +56,12 @@ public static class AsyncLogInterfaceTests
         string content = ReadAllLogs(directory.Path);
         for (int i = 0; i < 250; i++)
         {
-            AssertContains("flush-" + i, content);
+            Assert.Contains("flush-" + i, content);
         }
     }
 
-    private static void StopWithoutFlush_DiscardsOutstandingMessages()
+    [Fact]
+    public void StopWithoutFlush_DiscardsOutstandingMessages()
     {
         using TestLogDirectory directory = new();
         FakeClock clock = new(new DateTime(2026, 5, 28, 12, 0, 0));
@@ -101,7 +76,55 @@ public static class AsyncLogInterfaceTests
         logger.Stop_Without_Flush();
 
         int writtenMessages = CountMessages(directory.Path, "discard-");
-        AssertInRange(writtenMessages, 0, messageCount - 1);
+        Assert.InRange(writtenMessages, 0, messageCount - 1);
+    }
+
+    [Fact]
+    public void WriteLog_DropsMessagesWhenQueueIsFull()
+    {
+        using TestLogDirectory directory = new();
+        FakeClock clock = new(new DateTime(2026, 5, 28, 12, 0, 0));
+        using AsyncLogInterface logger = new(new AsyncLogOptions
+        {
+            LogDirectory = directory.Path,
+            Clock = clock,
+            QueueCapacity = 1
+        });
+
+        for (int i = 0; i < 1_000; i++)
+        {
+            logger.WriteLog("bounded-" + i);
+        }
+
+        logger.Stop_With_Flush();
+
+        int writtenMessages = CountMessages(directory.Path, "bounded-");
+        Assert.InRange(writtenMessages, 1, 999);
+    }
+
+    [Fact]
+    public void StopMethods_AreSafeWhenCalledConcurrently()
+    {
+        using TestLogDirectory directory = new();
+        FakeClock clock = new(new DateTime(2026, 5, 28, 12, 0, 0));
+        using AsyncLogInterface logger = CreateLogger(directory.Path, clock);
+
+        for (int i = 0; i < 1_000; i++)
+        {
+            logger.WriteLog("concurrent-stop-" + i);
+        }
+
+        Thread flushThread = new(logger.Stop_With_Flush);
+        Thread immediateThread = new(logger.Stop_Without_Flush);
+
+        flushThread.Start();
+        immediateThread.Start();
+
+        bool flushStopped = flushThread.Join(TimeSpan.FromSeconds(5));
+        bool immediateStopped = immediateThread.Join(TimeSpan.FromSeconds(5));
+
+        Assert.True(flushStopped);
+        Assert.True(immediateStopped);
     }
 
     private static AsyncLogInterface CreateLogger(string directory, ILogClock clock)
@@ -110,7 +133,7 @@ public static class AsyncLogInterfaceTests
         {
             LogDirectory = directory,
             Clock = clock,
-            IdleWaitTimeout = TimeSpan.FromMilliseconds(1)
+            QueueCapacity = 10_000
         });
     }
 
@@ -125,40 +148,6 @@ public static class AsyncLogInterfaceTests
             .SelectMany(File.ReadLines)
             .Count(line => line.Contains(prefix, StringComparison.Ordinal));
     }
-
-    private static void AssertContains(string expected, string actual)
-    {
-        if (!actual.Contains(expected, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException("Expected text was not found: " + expected);
-        }
-    }
-
-    private static void AssertEqual<T>(T expected, T actual)
-    {
-        if (!EqualityComparer<T>.Default.Equals(expected, actual))
-        {
-            throw new InvalidOperationException("Expected " + expected + ", got " + actual + ".");
-        }
-    }
-
-    private static void AssertAny<T>(IEnumerable<T> values, Func<T, bool> predicate)
-    {
-        if (!values.Any(predicate))
-        {
-            throw new InvalidOperationException("Expected at least one matching value.");
-        }
-    }
-
-    private static void AssertInRange(int actual, int minimum, int maximum)
-    {
-        if (actual < minimum || actual > maximum)
-        {
-            throw new InvalidOperationException("Expected value in range " + minimum + ".." + maximum + ", got " + actual + ".");
-        }
-    }
-
-    private sealed record TestCase(string Name, Action Run);
 
     private sealed class FakeClock : ILogClock
     {

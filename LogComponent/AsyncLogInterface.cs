@@ -1,21 +1,19 @@
-﻿using System.Collections.Concurrent;
+﻿using System.Threading.Channels;
 
 namespace LogTest
 {
     public sealed class AsyncLogInterface : LogInterface, IDisposable
     {
         private readonly AsyncLogOptions _options;
-        private readonly ConcurrentQueue<LogLine> _lines = new();
-        private readonly AutoResetEvent _workAvailable = new(false);
-        private readonly object _lifecycleLock = new();
+        private readonly Channel<LogLine> _channel;
+        private readonly object _joinLock = new();
         private readonly Thread _workerThread;
 
         private StreamWriter? _writer;
         private DateOnly? _currentFileDate;
-        private bool _acceptingWrites = true;
-        private volatile bool _stopRequested;
-        private bool _stopped;
-        private StopMode _stopMode = StopMode.Flush;
+        private int _stopRequested;
+        private int _immediateStopRequested;
+        private bool _joined;
 
         public AsyncLogInterface()
             : this(new AsyncLogOptions())
@@ -30,6 +28,17 @@ namespace LogTest
         public AsyncLogInterface(AsyncLogOptions options)
         {
             _options = options ?? throw new ArgumentNullException(nameof(options));
+            if (_options.QueueCapacity <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options), "Queue capacity must be greater than zero.");
+            }
+
+            _channel = Channel.CreateBounded<LogLine>(new BoundedChannelOptions(_options.QueueCapacity)
+            {
+                SingleReader = true,
+                SingleWriter = false,
+                FullMode = BoundedChannelFullMode.DropWrite
+            });
 
             _workerThread = new Thread(MainLoop)
             {
@@ -41,66 +50,53 @@ namespace LogTest
 
         public void WriteLog(string s)
         {
-            lock (_lifecycleLock)
+            if (Volatile.Read(ref _stopRequested) != 0)
             {
-                if (!_acceptingWrites)
-                {
-                    return;
-                }
-
-                _lines.Enqueue(new LogLine(s ?? string.Empty, _options.Clock.Now));
+                return;
             }
 
-            _workAvailable.Set();
+            _channel.Writer.TryWrite(new LogLine(s ?? string.Empty, _options.Clock.Now));
         }
 
         public void Stop_Without_Flush()
         {
-            RequestStop(StopMode.Immediate);
+            RequestStop(flush: false);
         }
 
         public void Stop_With_Flush()
         {
-            RequestStop(StopMode.Flush);
+            RequestStop(flush: true);
         }
 
         public void Dispose()
         {
             Stop_With_Flush();
-            _workAvailable.Dispose();
         }
 
-        private void RequestStop(StopMode stopMode)
+        private void RequestStop(bool flush)
         {
-            lock (_lifecycleLock)
+            if (!flush)
             {
-                if (_stopped)
-                {
-                    return;
-                }
-
-                _acceptingWrites = false;
-                _stopMode = stopMode;
-                _stopRequested = true;
-
-                if (stopMode == StopMode.Immediate)
-                {
-                    while (_lines.TryDequeue(out _))
-                    {
-                    }
-                }
+                Interlocked.Exchange(ref _immediateStopRequested, 1);
             }
 
-            _workAvailable.Set();
-
-            if (Thread.CurrentThread != _workerThread)
+            if (Interlocked.Exchange(ref _stopRequested, 1) == 0)
             {
-                _workerThread.Join();
+                _channel.Writer.TryComplete();
             }
 
-            lock (_lifecycleLock)
+            if (Thread.CurrentThread == _workerThread)
             {
-                _stopped = true;
+                return;
+            }
+
+            lock (_joinLock)
+            {
+                if (!_joined)
+                {
+                    _workerThread.Join();
+                    _joined = true;
+                }
             }
         }
 
@@ -108,25 +104,23 @@ namespace LogTest
         {
             try
             {
-                while (true)
+                ChannelReader<LogLine> reader = _channel.Reader;
+                while (reader.WaitToReadAsync().AsTask().GetAwaiter().GetResult())
                 {
-                    if (_stopRequested && _stopMode == StopMode.Immediate)
+                    if (Volatile.Read(ref _immediateStopRequested) != 0)
                     {
                         return;
                     }
 
-                    if (_lines.TryDequeue(out LogLine? logLine))
+                    while (reader.TryRead(out LogLine? logLine))
                     {
+                        if (Volatile.Read(ref _immediateStopRequested) != 0)
+                        {
+                            return;
+                        }
+
                         TryWrite(logLine);
-                        continue;
                     }
-
-                    if (_stopRequested && _stopMode == StopMode.Flush)
-                    {
-                        return;
-                    }
-
-                    _workAvailable.WaitOne(_options.IdleWaitTimeout);
                 }
             }
             finally
@@ -185,12 +179,6 @@ namespace LogTest
             _writer?.Dispose();
             _writer = null;
             _currentFileDate = null;
-        }
-
-        private enum StopMode
-        {
-            Flush,
-            Immediate
         }
     }
 }

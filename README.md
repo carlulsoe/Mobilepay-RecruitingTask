@@ -77,7 +77,7 @@ the end
 
 ## Solution notes
 
-The log component has been refactored around a single background worker and a thread-safe queue. Calls to `WriteLog` only timestamp and enqueue a message, so the calling application is not blocked by file I/O. The worker owns the file writer, opens a new file when the log entry date changes, and disposes the previous writer during rollover and shutdown.
+The log component has been refactored around a single background worker and a bounded channel. Calls to `WriteLog` only timestamp and enqueue a message, so the calling application is not blocked by file I/O. If the queue is full, the logger drops new messages rather than slowing down the calling application. The worker owns the file writer, opens a new file when the log entry date changes, and disposes the previous writer during rollover and shutdown.
 
 `Stop_With_Flush` stops accepting new messages and blocks until all accepted messages are written. `Stop_Without_Flush` stops accepting new messages, discards anything still queued, and then shuts the worker down. File-system errors are contained inside the worker so the calling application can continue; failed writes may be lost, but the logger attempts to recover on later writes by reopening the writer.
 
@@ -87,5 +87,11 @@ Run the verification with:
 
 ```bash
 dotnet build CodeTest.sln
-dotnet run --project LogComponent.Tests/LogComponent.Tests.csproj
+dotnet test CodeTest.sln
+```
+
+On this Linux/Homebrew setup, first-time NuGet package restore sometimes hangs while downloading xUnit packages unless IPv6 is disabled for the `dotnet` process. If restore stalls at "Determining projects to restore...", run:
+
+```bash
+DOTNET_SYSTEM_NET_DISABLEIPV6=1 dotnet restore CodeTest.sln
 ```
